@@ -27,6 +27,8 @@ that evidence. Your business tables are untouched; evidence lives in its own
 
 ## Quick start
 
+Step-by-step guide in plain words: [docs/HOW_TO.md](docs/HOW_TO.md).
+
 ```bash
 docker compose up -d
 pip install -e "./python[dev,evm]"
