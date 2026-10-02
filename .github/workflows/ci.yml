@@ -17,6 +17,7 @@ jobs:
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 15
     env:
       VERIDEX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      VERIDEX_TEST_EVM_RPC_URL: http://127.0.0.1:8545
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,8 +26,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: pip install -e "./python[dev]"
-      - run: pytest -v python/tests
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - run: pip install -e "./python[dev,evm]"
+      - name: Contract artifact is up to date
+        run: |
+          forge build --root contracts
+          python contracts/build.py
+          git diff --exit-code python/veridex/contracts/VeridexAnchor.json
+      - name: Start Anvil
+        run: |
+          anvil --silent &
+          for i in $(seq 1 30); do cast chain-id --rpc-url "$VERIDEX_TEST_EVM_RPC_URL" && break; sleep 1; done
+      # -rs lists skipped tests: the blockchain tests must not be skipped here.
+      - run: pytest -v -rs python/tests
       - name: Test vectors are up to date
         run: |
           python protocol/test-vectors/generate.py

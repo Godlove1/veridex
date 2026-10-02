@@ -11,7 +11,11 @@ import {
   checkpointHash,
   configHash,
   eventHash,
+  logKey,
+  merklePath,
+  merkleRoot,
   recordHash,
+  verifyInclusion,
   verifyLog,
   type SignedEvent,
 } from "../src/index.ts";
@@ -61,7 +65,37 @@ test("checkpoint hash and signature match", () => {
   assert.equal(checkpointHash(cp.body), cp.checkpoint_hash);
   const trusted = new TrustedKeys([vectors.key.public_key]);
   assert.ok(trusted.verify(cp.key_id, cp.checkpoint_hash, cp.signature));
-  assert.equal(cp.body.head, vectors.log.at(-1).event_hash, "checkpoint commits to the log head");
+  const hashes = vectors.log.map((e: SignedEvent) => e.event_hash);
+  assert.equal(cp.body.merkle_root, merkleRoot(hashes), "checkpoint commits to the batch's Merkle root");
+  assert.equal(logKey(vectors.log_key.log_id), vectors.log_key.log_key);
+});
+
+test("Merkle roots and inclusion paths match", () => {
+  for (const t of vectors.merkle) {
+    const n = t.leaves.length;
+    assert.equal(merkleRoot(t.leaves), t.root, `root of ${n} leaves`);
+    t.leaves.forEach((leaf: string, i: number) => {
+      assert.deepEqual(merklePath(t.leaves, i), t.paths[i], `path ${i} of ${n}`);
+      assert.ok(verifyInclusion(leaf, i, n, t.paths[i], t.root), `inclusion ${i} of ${n}`);
+    });
+  }
+});
+
+test("inclusion proofs reject anything but the exact leaf, position and root", () => {
+  const t = vectors.merkle.find((m: { leaves: string[] }) => m.leaves.length === 7);
+  const [leaf, path, root, n] = [t.leaves[2], t.paths[2], t.root, 7];
+  assert.ok(verifyInclusion(leaf, 2, n, path, root));
+  assert.ok(!verifyInclusion(t.leaves[3], 2, n, path, root), "different leaf");
+  assert.ok(!verifyInclusion(leaf, 3, n, path, root), "different position");
+  assert.ok(!verifyInclusion(leaf, 2, 4, path, root), "tree size with a different path shape");
+  assert.ok(!verifyInclusion(leaf, 2, n, path.slice(1), root), "truncated path");
+  assert.ok(!verifyInclusion(leaf, 2, n, [...path, path[0]], root), "extended path");
+  assert.ok(!verifyInclusion(leaf, 2, n, path, "0".repeat(64)), "different root");
+  assert.ok(!verifyInclusion(leaf, 7, n, path, root), "index out of range");
+  assert.ok(!verifyInclusion(leaf, 2, n, ["zz"], root), "malformed path");
+  // An interior node must not be accepted as a leaf (leaf/node domain separation).
+  assert.ok(!verifyInclusion(path[0], 1, 2, [], root));
+  assert.throws(() => merkleRoot([]));
 });
 
 test("offline log verification accepts the valid log", () => {

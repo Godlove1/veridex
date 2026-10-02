@@ -9,3 +9,10 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
       retries: 15
+
+  # Local EVM chain for the blockchain anchor (chain id 31337).
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:stable
+    entrypoint: ["anvil", "--host", "0.0.0.0"]
+    ports:
+      - "8545:8545"

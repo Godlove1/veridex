@@ -10,6 +10,13 @@ Usage:
 
 Uses DATABASE_URL (default: the docker compose database). Creates a throwaway
 `demo_payments` table and an ephemeral signing key.
+
+By default the anchor is a temporary file. To anchor on a local blockchain
+instead, start Anvil and point the demo at it:
+
+    anvil
+    pip install -e "./python[evm]"
+    ANVIL_RPC_URL=http://127.0.0.1:8545 python examples/demo.py
 """
 
 from __future__ import annotations
@@ -24,6 +31,8 @@ from veridex import FileAnchor, Signer, Veridex
 from veridex.adapters import PostgresAdapter
 
 URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+# Anvil's published development account 0. A public test key: local chains only.
+ANVIL_DEV_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
 
 def show(label: str, r) -> None:
@@ -39,7 +48,15 @@ def main() -> None:
             id int PRIMARY KEY, amount numeric(14,2), currency char(3), recipient text, status text)""")
 
     signer = Signer.generate()  # in production: Signer.from_seed_hex(os.environ["VERIDEX_SIGNING_KEY"])
-    anchor = FileAnchor(Path(tempfile.mkdtemp()) / "anchor.jsonl")
+    anvil = os.environ.get("ANVIL_RPC_URL")
+    if anvil:
+        from veridex.evm import EvmAnchor
+
+        contract = EvmAnchor.deploy(anvil, ANVIL_DEV_KEY)
+        anchor = EvmAnchor.anvil(contract, anvil, private_key=ANVIL_DEV_KEY)
+        print(f"\nAnchoring in VeridexAnchor at {contract} on Anvil")
+    else:
+        anchor = FileAnchor(Path(tempfile.mkdtemp()) / "anchor.jsonl")
     vx = Veridex(
         database=PostgresAdapter(URL, integrity_schema="veridex_demo"),
         trusted_keys=[signer.public_key_hex],  # verifiers pin this; never read it from the DB
@@ -72,7 +89,7 @@ def main() -> None:
     with psycopg.connect(URL, autocommit=True) as attacker:
         attacker.execute("DELETE FROM demo_payments WHERE id = 123")
     show("5. attacker: DELETE FROM demo_payments", vx.verify("demo_payments", 123))
-    print(f"\n  anchor file: {anchor.path}\n")
+    print(f"\n  anchor: {anchor!r}\n" if anvil else f"\n  anchor file: {anchor.path}\n")
     app.close()
 
 

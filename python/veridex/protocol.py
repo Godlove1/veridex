@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -25,6 +25,7 @@ from .canonical import canonical_bytes
 PROTOCOL_VERSION = 1
 HASH_ALGORITHM = "SHA-256"
 CANONICALIZATION = "vcf-1"
+MERKLE = "vmt-1"
 GENESIS_HASH = "0" * 64
 
 OPS_RECORD = ("CREATE", "UPDATE", "DELETE")
@@ -139,21 +140,124 @@ def event_hash(body: dict[str, Any]) -> str:
     return tagged_hash("event", body)
 
 
+# ---------------------------------------------------------------- merkle ----
+#
+# VMT-1: the RFC 6962 / RFC 9162 Merkle tree over the event hashes of one
+# batch, in seq order. Leaves and interior nodes are domain-separated, and an
+# odd node is promoted (never duplicated), so a root commits to exactly one
+# ordered list of leaves.
+
+
+def _hash32(hash_hex: str) -> bytes:
+    if not isinstance(hash_hex, str) or len(hash_hex) != 64:
+        raise ValueError("expected a 64-character hex hash")
+    if hash_hex != hash_hex.lower():
+        raise ValueError("hashes must be lowercase hex")
+    return bytes.fromhex(hash_hex)
+
+
+def _merkle_leaf(event_hash_hex: str) -> bytes:
+    return hashlib.sha256(b"veridex/v1/merkle-leaf\x00" + _hash32(event_hash_hex)).digest()
+
+
+def _merkle_node(left: bytes, right: bytes) -> bytes:
+    return hashlib.sha256(b"veridex/v1/merkle-node\x00" + left + right).digest()
+
+
+def _split(n: int) -> int:
+    """Largest power of two strictly less than n (n >= 2)."""
+    return 1 << ((n - 1).bit_length() - 1)
+
+
+def _subtree(leaves: Sequence[bytes]) -> bytes:
+    n = len(leaves)
+    if n == 1:
+        return leaves[0]
+    k = _split(n)
+    return _merkle_node(_subtree(leaves[:k]), _subtree(leaves[k:]))
+
+
+def merkle_root(event_hashes: Sequence[str]) -> str:
+    """Merkle root of a non-empty, ordered list of event hashes."""
+    if not event_hashes:
+        raise ValueError("a batch must contain at least one event")
+    return _subtree([_merkle_leaf(h) for h in event_hashes]).hex()
+
+
+def merkle_path(event_hashes: Sequence[str], index: int) -> list[str]:
+    """Inclusion path (sibling hashes, leaf to root) for the leaf at ``index``."""
+    if not 0 <= index < len(event_hashes):
+        raise ValueError("leaf index out of range")
+    leaves = [_merkle_leaf(h) for h in event_hashes]
+    path: list[bytes] = []
+    while len(leaves) > 1:
+        k = _split(len(leaves))
+        if index < k:
+            path.append(_subtree(leaves[k:]))
+            leaves = leaves[:k]
+        else:
+            path.append(_subtree(leaves[:k]))
+            leaves, index = leaves[k:], index - k
+    return [p.hex() for p in reversed(path)]
+
+
+def verify_inclusion(
+    event_hash_hex: str, leaf_index: int, tree_size: int, path: Sequence[str], root: str
+) -> bool:
+    """True iff ``event_hash_hex`` is leaf ``leaf_index`` of the ``tree_size``-leaf
+    tree with root ``root`` (RFC 9162 section 2.1.3.2). Never raises."""
+    try:
+        if isinstance(leaf_index, bool) or isinstance(tree_size, bool):
+            return False
+        if not 0 <= leaf_index < tree_size:
+            return False
+        fn, sn = leaf_index, tree_size - 1
+        r = _merkle_leaf(event_hash_hex)
+        for p in path:
+            sibling = _hash32(p)
+            if sn == 0:
+                return False
+            if fn & 1 or fn == sn:
+                r = _merkle_node(sibling, r)
+                while not fn & 1 and fn != 0:
+                    fn >>= 1
+                    sn >>= 1
+            else:
+                r = _merkle_node(r, sibling)
+            fn >>= 1
+            sn >>= 1
+        return sn == 0 and r == _hash32(root)
+    except (ValueError, TypeError):
+        return False
+
+
 # ------------------------------------------------------------ checkpoint ----
 
+CHECKPOINT_VERSION = 2  # v1 (stage 1) committed to the log head only
 
-def checkpoint_body(*, log_id: str, seq: int, head: str, created_at: str) -> dict[str, Any]:
+
+def checkpoint_body(
+    *, log_id: str, batch: int, from_seq: int, seq: int, merkle_root: str, created_at: str
+) -> dict[str, Any]:
+    """A checkpoint commits to batch number ``batch``: events ``from_seq..seq``."""
     return {
-        "v": PROTOCOL_VERSION,
+        "v": CHECKPOINT_VERSION,
         "log_id": log_id,
+        "batch": batch,
+        "from_seq": from_seq,
         "seq": seq,
-        "head": head,
+        "merkle_root": merkle_root,
         "created_at": created_at,
     }
 
 
 def checkpoint_hash(body: dict[str, Any]) -> str:
     return tagged_hash("checkpoint", body)
+
+
+def log_key(log_id: str) -> str:
+    """32-byte key under which a log's batches are anchored on a blockchain."""
+    return tagged_hash("log", log_id)
 
 
 # ------------------------------------------------------------- signatures ---

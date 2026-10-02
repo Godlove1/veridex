@@ -127,6 +127,21 @@ def test_04c_resurrected_row_is_tampered(vx, app, attacker):
     assert Reason.RECORD_RESURRECTED in r.reasons
 
 
+def test_dropped_column_or_table_is_tampered(vx, app, attacker):
+    """Removing a protected column or the whole table is tampering, reported as
+    a result and not as a database driver error."""
+    create_payment(vx, app)
+    vx.checkpoint()
+    with attacker() as sql:
+        sql.execute("ALTER TABLE payments DROP COLUMN status")
+    r = vx.verify("payments", 123)
+    assert r.status == Status.TAMPERED and Reason.SCHEMA_CHANGED in r.reasons
+    with attacker() as sql:
+        sql.execute("DROP TABLE payments")
+    r = vx.verify("payments", 123)
+    assert r.status == Status.TAMPERED and Reason.SCHEMA_CHANGED in r.reasons
+
+
 def test_untracked_row_is_unverified(vx, attacker):
     with attacker() as sql:
         sql.execute("INSERT INTO payments (id, amount, currency, recipient, status) "
@@ -243,7 +258,7 @@ def test_06_tampered_checkpoint_in_anchor_is_invalid(vx, app, anchor_path):
     create_payment(vx, app)
     vx.checkpoint()
     cp = json.loads(anchor_path.read_text())
-    cp["head"] = "c" * 64
+    cp["merkle_root"] = "c" * 64
     anchor_path.write_text(json.dumps(cp) + "\n")
     r = vx.verify("payments", 123)
     assert r.status == Status.INVALID_PROOF
@@ -251,10 +266,12 @@ def test_06_tampered_checkpoint_in_anchor_is_invalid(vx, app, anchor_path):
 
 
 def test_07_anchored_head_mismatch_is_invalid(vx, app, attacker, signer, anchor_path):
-    """A validly signed checkpoint whose head is not in the database."""
+    """Spec 54 test 7: a validly signed checkpoint whose Merkle root is not
+    the root of the events in the database."""
     create_payment(vx, app)
     head = vx.db.read_head()
-    body = P.checkpoint_body(log_id=head["log_id"], seq=1, head="d" * 64, created_at="2026-10-02T00:00:00.000000Z")
+    body = P.checkpoint_body(log_id=head["log_id"], batch=1, from_seq=1, seq=1, merkle_root="d" * 64,
+                             created_at="2026-10-02T00:00:00.000000Z")
     h = P.checkpoint_hash(body)
     FileAnchor(anchor_path).publish(dict(body, checkpoint_hash=h, key_id=signer.key_id, signature=signer.sign(h)))
     r = vx.verify("payments", 123)

@@ -45,6 +45,48 @@ def test_log_and_checkpoint_vectors():
     assert P.config_hash(VECTORS["config"]["body"]) == VECTORS["config"]["config_hash"]
 
 
+def test_checkpoint_commits_to_merkle_root_of_its_batch():
+    cp = VECTORS["checkpoint"]["body"]
+    assert cp["v"] == P.CHECKPOINT_VERSION
+    assert cp["merkle_root"] == P.merkle_root([e["event_hash"] for e in VECTORS["log"]])
+    assert P.log_key(VECTORS["log_key"]["log_id"]) == VECTORS["log_key"]["log_key"]
+
+
+def test_merkle_vectors():
+    for t in VECTORS["merkle"]:
+        n = len(t["leaves"])
+        assert P.merkle_root(t["leaves"]) == t["root"]
+        for i, leaf in enumerate(t["leaves"]):
+            assert P.merkle_path(t["leaves"], i) == t["paths"][i]
+            assert P.verify_inclusion(leaf, i, n, t["paths"][i], t["root"])
+
+
+def test_inclusion_proof_rejects_everything_but_the_exact_claim():
+    t = next(m for m in VECTORS["merkle"] if len(m["leaves"]) == 7)
+    leaf, path, root, n = t["leaves"][2], t["paths"][2], t["root"], 7
+    assert P.verify_inclusion(leaf, 2, n, path, root)
+    assert not P.verify_inclusion(t["leaves"][3], 2, n, path, root)  # different leaf
+    assert not P.verify_inclusion(leaf, 3, n, path, root)  # different position
+    assert not P.verify_inclusion(leaf, 2, 4, path, root)  # tree size with a different path shape
+    assert not P.verify_inclusion(leaf, 2, n, path[1:], root)  # truncated path
+    assert not P.verify_inclusion(leaf, 2, n, path + [path[0]], root)  # extended path
+    assert not P.verify_inclusion(leaf, 2, n, path, "0" * 64)  # different root
+    assert not P.verify_inclusion(leaf, 7, n, path, root)  # index out of range
+    assert not P.verify_inclusion(leaf, 2, n, ["zz"], root)  # malformed path
+    # An interior node must not be accepted as a leaf (leaf/node domain separation).
+    assert not P.verify_inclusion(path[0], 1, 2, [], root)
+    with pytest.raises(ValueError):
+        P.merkle_root([])
+
+
+def test_merkle_root_commits_to_order_and_count():
+    leaves = VECTORS["merkle"][4]["leaves"]  # 5 leaves
+    root = P.merkle_root(leaves)
+    assert P.merkle_root(leaves[::-1]) != root
+    assert P.merkle_root(leaves[:-1]) != root
+    assert P.merkle_root(leaves + leaves[-1:]) != root  # no duplicate-last-leaf ambiguity
+
+
 def test_domain_separation():
     v = {"a": "1"}
     assert len({P.tagged_hash(t, v) for t in ("record", "event", "config", "checkpoint")}) == 4
@@ -102,7 +144,7 @@ def test_typescript_verifies_python_written_log(vx, app, tmp_path):
     f.write_text(json.dumps({"events": export, "trusted": [vx.signer.public_key_hex]}))
     script = (
         "import {readFileSync} from 'node:fs';"
-        f"import {{verifyLog, TrustedKeys}} from '{(ROOT / 'typescript/src/index.ts').as_posix()}';"
+        f"import {{verifyLog, TrustedKeys}} from '{(ROOT / 'typescript/src/index.ts').as_uri()}';"
         "const d = JSON.parse(readFileSync(process.argv[1], 'utf8'));"
         "console.log(JSON.stringify(verifyLog(d.events, new TrustedKeys(d.trusted))));"
     )

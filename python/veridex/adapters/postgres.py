@@ -25,6 +25,8 @@ import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from ..results import SchemaChangedError
+
 SCHEMA_SQL = """
 CREATE SCHEMA IF NOT EXISTS {schema};
 
@@ -68,6 +70,18 @@ CREATE TABLE IF NOT EXISTS {schema}.protected_resources (
     current_version  integer NOT NULL
 );
 
+-- Convenience copy of what was published to the anchor (signed checkpoint and
+-- the anchor's receipt). Never trusted: verification reads the anchor itself.
+CREATE TABLE IF NOT EXISTS {schema}.batches (
+    batch        bigint  PRIMARY KEY,
+    from_seq     bigint  NOT NULL,
+    seq          bigint  NOT NULL,
+    merkle_root  text    NOT NULL,
+    checkpoint   text    NOT NULL,
+    receipt      text    NOT NULL,
+    created_at   text    NOT NULL
+);
+
 -- Defense in depth only. A superuser can disable these triggers; the real
 -- protection is signatures + external checkpoints.
 CREATE OR REPLACE FUNCTION {schema}.forbid_mutation() RETURNS trigger AS $$
@@ -83,6 +97,10 @@ CREATE TRIGGER events_append_only BEFORE UPDATE OR DELETE ON {schema}.events
 
 DROP TRIGGER IF EXISTS configurations_append_only ON {schema}.configurations;
 CREATE TRIGGER configurations_append_only BEFORE UPDATE OR DELETE ON {schema}.configurations
+    FOR EACH ROW EXECUTE FUNCTION {schema}.forbid_mutation();
+
+DROP TRIGGER IF EXISTS batches_append_only ON {schema}.batches;
+CREATE TRIGGER batches_append_only BEFORE UPDATE OR DELETE ON {schema}.batches
     FOR EACH ROW EXECUTE FUNCTION {schema}.forbid_mutation();
 """
 
@@ -226,6 +244,17 @@ class PostgresAdapter:
             cur.execute(self._q("SELECT * FROM {schema}.events ORDER BY seq"))
             return list(cur.fetchall())
 
+    def events_range(
+        self, from_seq: int, to_seq: int, conn: Optional[psycopg.Connection] = None
+    ) -> list[dict[str, Any]]:
+        with self.transaction(conn) as c:
+            cur = self._cur(c)
+            cur.execute(
+                self._q("SELECT * FROM {schema}.events WHERE seq BETWEEN %s AND %s ORDER BY seq"),
+                (from_seq, to_seq),
+            )
+            return list(cur.fetchall())
+
     def record_events(
         self, resource: str, record_id: str, conn: Optional[psycopg.Connection] = None
     ) -> list[dict[str, Any]]:
@@ -237,6 +266,35 @@ class PostgresAdapter:
                 ),
                 (resource, record_id),
             )
+            return list(cur.fetchall())
+
+    # ------------------------------------------------------------- batches --
+
+    def insert_batch(
+        self,
+        *,
+        batch: int,
+        from_seq: int,
+        seq: int,
+        merkle_root: str,
+        checkpoint: str,
+        receipt: str,
+        created_at: str,
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                self._q(
+                    "INSERT INTO {schema}.batches "
+                    "(batch, from_seq, seq, merkle_root, checkpoint, receipt, created_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (batch) DO NOTHING"
+                ),
+                (batch, from_seq, seq, merkle_root, checkpoint, receipt, created_at),
+            )
+
+    def load_batches(self, conn: Optional[psycopg.Connection] = None) -> list[dict[str, Any]]:
+        with self.transaction(conn) as c:
+            cur = self._cur(c)
+            cur.execute(self._q("SELECT * FROM {schema}.batches ORDER BY batch"))
             return list(cur.fetchall())
 
     # ------------------------------------------------------- configuration --
@@ -311,15 +369,18 @@ class PostgresAdapter:
         )
         cols = sql.SQL(", ").join(sql.Identifier(f) for f in fields)
         cur = self._cur(conn)
-        cur.execute(
-            sql.SQL("SELECT {cols} FROM {s}.{t} WHERE {where}").format(
-                cols=cols,
-                s=sql.Identifier(schema_name),
-                t=sql.Identifier(table_name),
-                where=where,
-            ),
-            pk_values,
+        query = sql.SQL("SELECT {cols} FROM {s}.{t} WHERE {where}").format(
+            cols=cols,
+            s=sql.Identifier(schema_name),
+            t=sql.Identifier(table_name),
+            where=where,
         )
+        try:
+            # Savepoint: a failed SELECT must not abort the caller's transaction.
+            with conn.transaction():
+                cur.execute(query, pk_values)
+        except (psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedTable) as e:
+            raise SchemaChangedError(f"{schema_name}.{table_name}: {e.diag.message_primary}") from e
         rows = cur.fetchall()
         if len(rows) > 1:
             raise RuntimeError(

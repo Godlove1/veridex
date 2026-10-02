@@ -13,6 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+evm = ["web3>=7"]  # blockchain anchoring (Anvil, Base); tested with web3 8.0
 dev = ["pytest>=8"]
 
 [project.scripts]
@@ -20,6 +21,9 @@ veridex = "veridex.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["veridex*"]
+
+[tool.setuptools.package-data]
+veridex = ["contracts/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

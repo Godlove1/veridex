@@ -14,9 +14,12 @@ from .normalize import normalize_record, normalize_record_id
 from .results import (
     ConfigurationError,
     InvalidOperationError,
+    LogIntegrityError,
+    NotAnchoredError,
     Problem,
     Reason,
     RecordNotFoundError,
+    SchemaChangedError,
     Status,
     VerificationResult,
 )
@@ -34,8 +37,12 @@ LOG_REASONS = {
     Reason.HEAD_MISMATCH,
     Reason.CHECKPOINT_MISMATCH,
     Reason.CHECKPOINT_INVALID,
+    Reason.LOG_ID_MISMATCH,
     Reason.CONFIG_REFERENCE_INVALID,
 }
+
+DEFAULT_BATCH_SIZE = 5000  # events per Merkle batch
+DEFAULT_BATCH_INTERVAL = 300  # seconds an event may wait before a batch is due
 
 
 def utc_now() -> str:
@@ -85,6 +92,17 @@ class AuditReport:
     configs_by_hash: dict[str, ResourceConfig] = field(default_factory=dict)
     latest_config: dict[str, ResourceConfig] = field(default_factory=dict)
     record_events: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
+    events_by_seq: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # Anchored batches that match the database, oldest first. Each entry is
+    # what the anchor returned plus ``from_seq``.
+    batches: list[dict[str, Any]] = field(default_factory=list)
+
+    def batch_for(self, seq: int) -> Optional[dict[str, Any]]:
+        """The anchored batch whose Merkle tree contains event ``seq``."""
+        for b in self.batches:
+            if b["from_seq"] <= seq <= b["seq"]:
+                return b
+        return None
 
     @property
     def log_problems(self) -> list[Problem]:
@@ -105,6 +123,7 @@ class AuditReport:
         return {
             "log_id": self.log_id,
             "event_count": self.event_count,
+            "anchored_batches": len(self.batches),
             "anchored_through_seq": self.anchored_through_seq,
             "anchor_error": self.anchor_error,
             "problems": [p.to_dict() for p in self.problems],
@@ -148,7 +167,13 @@ class Veridex:
                   Load them from configuration, NEVER from the protected database.
     signer:       Ed25519 signer used to write events and checkpoints. Only the
                   process that records events needs it; verifiers do not.
-    anchor:       where checkpoints are published (FileAnchor in stage 1).
+    anchor:       where checkpoints are published (FileAnchor, EvmAnchor).
+    log_id:       optional pin of the log this verifier expects, obtained from
+                  init() and kept outside the database. Detects the whole
+                  evidence log being swapped for a fresh one.
+    batch_size:   maximum number of events per anchored Merkle batch.
+    batch_interval: seconds an unanchored event may wait before
+                  ``checkpoint(if_due=True)`` anchors it.
     """
 
     def __init__(
@@ -158,11 +183,19 @@ class Veridex:
         trusted_keys: Iterable[str],
         signer: Optional[P.Signer] = None,
         anchor: Optional[Anchor] = None,
+        log_id: Optional[str] = None,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        batch_interval: float = DEFAULT_BATCH_INTERVAL,
     ):
+        if batch_size < 1:
+            raise ConfigurationError("batch_size must be at least 1")
         self.db = database
         self.trusted = P.TrustedKeys(trusted_keys)
         self.signer = signer
         self.anchor = anchor
+        self.log_id = log_id
+        self.batch_size = batch_size
+        self.batch_interval = batch_interval
         if signer is not None and signer.key_id not in self.trusted:
             raise ConfigurationError("the signer's public key is not in trusted_keys")
         self._declared: dict[str, tuple[list[str], list[str]]] = {}
@@ -400,32 +433,176 @@ class Veridex:
 
     # --------------------------------------------------------- checkpoint --
 
-    def checkpoint(self) -> Optional[dict[str, Any]]:
-        """Sign the current log head and publish it to the anchor.
+    def _event_problems(self, e: dict[str, Any], expected_seq: int, prev_log: str) -> list[Problem]:
+        """The checks one event needs no other state for: position, hash,
+        signature and its link to the previous event."""
+        seq, out = e["seq"], []
+        if seq != expected_seq:
+            out.append(Problem(Reason.SEQ_GAP, f"expected seq {expected_seq}, found {seq}", seq))
+        try:
+            recomputed = P.event_hash(_event_body_from_row(e))
+        except CanonicalizationError as ex:
+            recomputed = None
+            out.append(Problem(Reason.EVENT_HASH_MISMATCH, f"event not canonicalizable: {ex}", seq))
+        if recomputed != e["event_hash"]:
+            out.append(Problem(Reason.EVENT_HASH_MISMATCH, "stored event does not match its hash", seq))
+        if not self.trusted.verify(e["key_id"], e["event_hash"], e["signature"]):
+            out.append(Problem(Reason.BAD_SIGNATURE, f"signature invalid or key {e['key_id']} not trusted", seq))
+        if e["prev_log_hash"] != prev_log:
+            out.append(Problem(Reason.LOG_CHAIN_BROKEN, "prev_log_hash does not link to previous event", seq))
+        return out
 
-        Returns None if there is nothing new to anchor. In stage 4+ this is
-        where Merkle batching will live; the checkpoint already commits to every
-        event up to ``seq`` through the log hash chain.
+    def _read_anchor(self, log_id: str, *, pending: bool = False) -> tuple[list[dict[str, Any]], list[Problem]]:
+        """Read the anchor. Returns the gap-free chain of batches 1..k published
+        for this log (each with ``from_seq``) and the problems found. Whether a
+        batch matches the database is the caller's check. Raises AnchorError."""
+        assert self.anchor is not None
+        signed = getattr(self.anchor, "requires_signature", True)
+        problems: list[Problem] = []
+        own: dict[int, dict[str, Any]] = {}
+        for cp in self.anchor.checkpoints(log_id, pending=pending):
+            try:
+                batch, seq, root = cp["batch"], cp["seq"], cp["merkle_root"]
+                if not all(type(n) is int and n >= 1 for n in (batch, seq)):
+                    raise ValueError("batch and seq must be positive integers")
+                P._hash32(root)
+                if signed:
+                    if cp["v"] != P.CHECKPOINT_VERSION:
+                        raise ValueError(f"unsupported checkpoint version {cp['v']}")
+                    h = P.checkpoint_hash(P.checkpoint_body(
+                        log_id=cp["log_id"], batch=batch, from_seq=cp["from_seq"], seq=seq,
+                        merkle_root=root, created_at=cp["created_at"]))
+                    if h != cp.get("checkpoint_hash") or not self.trusted.verify(
+                        cp.get("key_id", ""), h, cp.get("signature", "")
+                    ):
+                        problems.append(Problem(Reason.CHECKPOINT_INVALID,
+                                                "checkpoint hash or signature invalid", seq))
+                        continue
+                cp_log = cp["log_id"]
+            except (KeyError, TypeError, ValueError, CanonicalizationError) as ex:
+                problems.append(Problem(Reason.CHECKPOINT_INVALID, f"malformed checkpoint: {ex!r}"))
+                continue
+            if cp_log != log_id:
+                problems.append(Problem(
+                    Reason.CHECKPOINT_MISMATCH,
+                    f"anchor holds a checkpoint for log {cp_log}, database is log {log_id}", seq))
+                continue
+            seen = own.setdefault(batch, cp)
+            if (seen["seq"], seen["merkle_root"]) != (seq, root):
+                problems.append(Problem(Reason.CHECKPOINT_INVALID,
+                                        f"anchor holds conflicting checkpoints for batch {batch}", seq))
+
+        chain: list[dict[str, Any]] = []
+        prev_seq = 0
+        for n in sorted(own):
+            cp = own[n]
+            if n != len(chain) + 1:
+                problems.append(Problem(Reason.CHECKPOINT_INVALID,
+                                        f"anchored batch numbering has a gap before batch {n}", cp["seq"]))
+                break
+            if cp["seq"] <= prev_seq or cp.get("from_seq", prev_seq + 1) != prev_seq + 1:
+                problems.append(Problem(Reason.CHECKPOINT_INVALID,
+                                        f"anchored batch {n} does not continue batch {n - 1}", cp["seq"]))
+                break
+            chain.append(dict(cp, from_seq=prev_seq + 1))
+            prev_seq = cp["seq"]
+        return chain, problems
+
+    def _due(self, pending: list[dict[str, Any]]) -> bool:
+        """Batching policy: a batch is due once ``batch_size`` events are
+        waiting or the oldest waiting event is ``batch_interval`` seconds old."""
+        if len(pending) >= self.batch_size:
+            return True
+        try:
+            oldest = _dt.datetime.strptime(pending[0]["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+        except ValueError:
+            return True
+        age = _dt.datetime.now(_dt.timezone.utc) - oldest.replace(tzinfo=_dt.timezone.utc)
+        return age.total_seconds() >= self.batch_interval
+
+    def checkpoint(self, *, if_due: bool = False) -> Optional[dict[str, Any]]:
+        """Anchor every event recorded since the last checkpoint.
+
+        The waiting events are split into batches of at most ``batch_size``.
+        Each batch becomes a Merkle tree whose root is signed and published to
+        the anchor. Returns the last checkpoint published, or None if there was
+        nothing to anchor (or, with ``if_due=True``, the batching policy says
+        to wait).
+
+        Before publishing, the last anchored batch is re-checked against the
+        database and the waiting events are checked for valid hashes, trusted
+        signatures and an unbroken chain. An anchor is write-once, so a batch
+        that would fail verification is refused, not anchored: this raises
+        LogIntegrityError and leaves the anchor untouched.
         """
         signer = self._require_signer()
         if self.anchor is None:
             raise ConfigurationError("no anchor configured")
         head = self.db.read_head()
+        if self.log_id is not None and head["log_id"] != self.log_id:
+            raise LogIntegrityError(
+                f"database holds log {head['log_id']}, expected {self.log_id}; refusing to anchor")
         if head["seq"] == 0:
             return None
-        try:
-            prior = [c for c in self.anchor.checkpoints(head["log_id"]) if c.get("log_id") == head["log_id"]]
-        except AnchorError:
-            prior = []
-        if prior and max(c["seq"] for c in prior) >= head["seq"]:
+        chain, problems = self._read_anchor(head["log_id"], pending=True)
+        invalid = [p for p in problems if p.reason == Reason.CHECKPOINT_INVALID]
+        if invalid:
+            raise LogIntegrityError(f"the anchor holds invalid checkpoints: {invalid[0].message}")
+
+        last_seq, prev_hash = 0, P.GENESIS_HASH
+        if chain:
+            last = chain[-1]
+            last_seq = last["seq"]
+            if head["seq"] < last_seq:
+                raise LogIntegrityError(
+                    f"database log ends at seq {head['seq']} but seq {last_seq} is anchored")
+            hashes = [e["event_hash"] for e in self.db.events_range(last["from_seq"], last_seq)]
+            try:
+                matches = (len(hashes) == last_seq - last["from_seq"] + 1
+                           and P.merkle_root(hashes) == last["merkle_root"])
+            except ValueError:
+                matches = False
+            if not matches:
+                raise LogIntegrityError(
+                    f"the database no longer matches anchored batch {last['batch']}; "
+                    "refusing to anchor on top of it")
+            prev_hash = hashes[-1]
+        if head["seq"] == last_seq:
             return None
-        body = P.checkpoint_body(
-            log_id=head["log_id"], seq=head["seq"], head=head["head_hash"], created_at=utc_now()
-        )
-        h = P.checkpoint_hash(body)
-        cp = dict(body, checkpoint_hash=h, key_id=signer.key_id, signature=signer.sign(h))
-        cp["receipt"] = self.anchor.publish(cp)
-        return cp
+
+        pending = self.db.events_range(last_seq + 1, head["seq"])
+        if len(pending) != head["seq"] - last_seq:
+            raise LogIntegrityError("events are missing between the anchor and the log head")
+        if if_due and not self._due(pending):
+            return None
+        for i, e in enumerate(pending, start=last_seq + 1):
+            bad = self._event_problems(e, i, prev_hash)
+            if bad:
+                raise LogIntegrityError(
+                    f"refusing to anchor event {e['seq']}: {bad[0].reason.value}: {bad[0].message}")
+            prev_hash = e["event_hash"]
+
+        published: Optional[dict[str, Any]] = None
+        for i in range(0, len(pending), self.batch_size):
+            chunk = pending[i:i + self.batch_size]
+            body = P.checkpoint_body(
+                log_id=head["log_id"],
+                batch=len(chain) + 1 + i // self.batch_size,
+                from_seq=chunk[0]["seq"],
+                seq=chunk[-1]["seq"],
+                merkle_root=P.merkle_root([e["event_hash"] for e in chunk]),
+                created_at=utc_now(),
+            )
+            h = P.checkpoint_hash(body)
+            cp = dict(body, checkpoint_hash=h, key_id=signer.key_id, signature=signer.sign(h))
+            receipt = self.anchor.publish(cp)
+            self.db.insert_batch(
+                batch=body["batch"], from_seq=body["from_seq"], seq=body["seq"],
+                merkle_root=body["merkle_root"], checkpoint=canonicalize(cp),
+                receipt=json.dumps(receipt, sort_keys=True), created_at=body["created_at"],
+            )
+            published = dict(cp, receipt=receipt)
+        return published
 
     # -------------------------------------------------------------- audit --
 
@@ -433,16 +610,20 @@ class Veridex:
         """Verify the entire evidence log: hashes, signatures, chains,
         transitions, configuration table, and external checkpoints.
 
-        Cost is O(total events). Merkle batching (stage 4) will make
-        per-record verification cheaper; correctness comes first.
+        Cost is O(total events): knowing that an event is the LATEST one for
+        its record means knowing nothing later was removed, which takes the
+        whole log (see docs/DECISIONS.md D14).
         """
         head = self.db.read_head()
         events = self.db.load_events()
         rep = AuditReport(log_id=head["log_id"], event_count=len(events))
         add = rep.problems.append
+        if self.log_id is not None and head["log_id"] != self.log_id:
+            add(Problem(Reason.LOG_ID_MISMATCH,
+                        f"database holds log {head['log_id']}, expected {self.log_id}"))
 
         prev_log = P.GENESIS_HASH
-        by_seq: dict[int, dict[str, Any]] = {}
+        by_seq = rep.events_by_seq
         last_rec: dict[tuple[str, str], dict[str, Any]] = {}
         last_cfg: dict[str, dict[str, Any]] = {}
         cfg_events: dict[str, list[dict[str, Any]]] = {}
@@ -450,19 +631,7 @@ class Veridex:
         for i, e in enumerate(events, start=1):
             seq = e["seq"]
             by_seq[seq] = e
-            if seq != i:
-                add(Problem(Reason.SEQ_GAP, f"expected seq {i}, found {seq}", seq))
-            try:
-                recomputed = P.event_hash(_event_body_from_row(e))
-            except CanonicalizationError as ex:
-                recomputed = None
-                add(Problem(Reason.EVENT_HASH_MISMATCH, f"event not canonicalizable: {ex}", seq))
-            if recomputed != e["event_hash"]:
-                add(Problem(Reason.EVENT_HASH_MISMATCH, "stored event does not match its hash", seq))
-            if not self.trusted.verify(e["key_id"], e["event_hash"], e["signature"]):
-                add(Problem(Reason.BAD_SIGNATURE, f"signature invalid or key {e['key_id']} not trusted", seq))
-            if e["prev_log_hash"] != prev_log:
-                add(Problem(Reason.LOG_CHAIN_BROKEN, "prev_log_hash does not link to previous event", seq))
+            rep.problems.extend(self._event_problems(e, i, prev_log))
             prev_log = e["event_hash"]
 
             res = e["resource"]
@@ -530,41 +699,30 @@ class Veridex:
             elif signed and signed[-1] in rep.configs_by_hash:
                 rep.latest_config[res] = rep.configs_by_hash[signed[-1]]
 
-        # External checkpoints.
+        # Anchored batches: each Merkle root must match the events in the database.
         if self.anchor is None:
             rep.anchor_error = "no anchor configured"
-        else:
+            return rep
+        try:
+            chain, anchor_problems = self._read_anchor(head["log_id"])
+        except AnchorError as ex:
+            rep.anchor_error = str(ex)
+            return rep
+        rep.problems.extend(anchor_problems)
+        for cp in chain:
             try:
-                cps = self.anchor.checkpoints(head["log_id"])
-            except AnchorError as ex:
-                cps = []
-                rep.anchor_error = str(ex)
-            for cp in cps:
-                try:
-                    body = P.checkpoint_body(
-                        log_id=cp["log_id"], seq=cp["seq"], head=cp["head"], created_at=cp["created_at"]
-                    )
-                    h = P.checkpoint_hash(body)
-                except (KeyError, TypeError, CanonicalizationError):
-                    add(Problem(Reason.CHECKPOINT_INVALID, "malformed checkpoint"))
-                    continue
-                if h != cp.get("checkpoint_hash") or not self.trusted.verify(
-                    cp.get("key_id", ""), h, cp.get("signature", "")
-                ):
-                    add(Problem(Reason.CHECKPOINT_INVALID, "checkpoint hash or signature invalid", cp.get("seq")))
-                    continue
-                if cp["log_id"] != head["log_id"]:
-                    add(Problem(Reason.CHECKPOINT_MISMATCH,
-                                f"anchor holds a checkpoint for log {cp['log_id']}, database is log {head['log_id']}",
-                                cp["seq"]))
-                    continue
-                anchored_event = by_seq.get(cp["seq"])
-                if anchored_event is None or anchored_event["event_hash"] != cp["head"]:
-                    add(Problem(Reason.CHECKPOINT_MISMATCH,
-                                "anchored log head not found in the database: log was rewritten or truncated",
-                                cp["seq"]))
-                    continue
-                rep.anchored_through_seq = max(rep.anchored_through_seq, cp["seq"])
+                matches = cp["seq"] <= len(events) and P.merkle_root(
+                    [by_seq[n]["event_hash"] for n in range(cp["from_seq"], cp["seq"] + 1)]
+                ) == cp["merkle_root"]
+            except (KeyError, ValueError):
+                matches = False
+            if not matches:
+                add(Problem(Reason.CHECKPOINT_MISMATCH,
+                            f"anchored Merkle root of batch {cp['batch']} does not match the database: "
+                            "log was rewritten or truncated", cp["seq"]))
+                break
+            rep.batches.append(cp)
+            rep.anchored_through_seq = cp["seq"]
         return rep
 
     # ------------------------------------------------------------- verify --
@@ -613,7 +771,8 @@ class Veridex:
         cfg = rep.configs_by_hash.get(last["config_hash"])
         if cfg is None:
             return result(Status.CONFIGURATION_ERROR, Reason.CONFIG_REFERENCE_INVALID, rid=rid)
-        anchored = last["seq"] <= rep.anchored_through_seq
+        batch = rep.batch_for(last["seq"])
+        anchored = batch is not None
         warn = [Reason.CONFIG_SUPERSEDED] if cfg.config_hash != latest.config_hash else []
         common = dict(
             rid=rid,
@@ -622,17 +781,23 @@ class Veridex:
             event_hash=last["event_hash"],
             expected_record_hash=last["record_hash"],
             anchored=anchored,
+            batch=batch["batch"] if batch else None,
+            merkle_root=batch["merkle_root"] if batch else None,
         )
 
-        with self.db.transaction() as conn:
-            row = self.db.fetch_row(
-                conn,
-                schema_name=cfg.schema,
-                table_name=cfg.table,
-                primary_key=cfg.primary_key,
-                pk_values=pk_vals,
-                fields=cfg.fields,
-            )
+        try:
+            with self.db.transaction() as conn:
+                row = self.db.fetch_row(
+                    conn,
+                    schema_name=cfg.schema,
+                    table_name=cfg.table,
+                    primary_key=cfg.primary_key,
+                    pk_values=pk_vals,
+                    fields=cfg.fields,
+                )
+        except SchemaChangedError:
+            # The evidence describes columns that can no longer be read.
+            return result(Status.TAMPERED, Reason.SCHEMA_CHANGED, *warn, **common)
 
         def unanchored() -> VerificationResult:
             st = Status.ANCHOR_FAILED if rep.anchor_error else Status.PENDING_ANCHOR
@@ -654,6 +819,73 @@ class Veridex:
         if current != last["record_hash"]:
             return result(Status.TAMPERED, Reason.STATE_MISMATCH, *warn, **common)
         return result(Status.VERIFIED, *warn, **common) if anchored else unanchored()
+
+    # ------------------------------------------------------------- proofs --
+
+    def inclusion_proof(self, seq: int, *, audit: Optional[AuditReport] = None) -> dict[str, Any]:
+        """Merkle proof that event ``seq`` is part of an anchored batch.
+
+        The proof holds the signed event, its Merkle path and the anchored
+        root. Check it with ``protocol.verify_inclusion`` and the event
+        signature; neither needs the database.
+        """
+        rep = audit or self.audit()
+        if rep.log_problems:
+            raise LogIntegrityError("the evidence log fails audit; no proof can be issued")
+        batch = rep.batch_for(seq)
+        if batch is None:
+            if rep.anchor_error:
+                raise AnchorError(rep.anchor_error)
+            raise NotAnchoredError(f"event {seq} is not covered by an anchored batch")
+        e = rep.events_by_seq[seq]
+        hashes = [rep.events_by_seq[n]["event_hash"] for n in range(batch["from_seq"], batch["seq"] + 1)]
+        index = seq - batch["from_seq"]
+        receipt = None
+        for row in self.db.load_batches():  # convenience copy, e.g. the transaction hash
+            if row["batch"] == batch["batch"] and row["merkle_root"] == batch["merkle_root"]:
+                receipt = json.loads(row["receipt"])
+        return {
+            "protocol": {
+                "version": P.PROTOCOL_VERSION,
+                "hash_algorithm": P.HASH_ALGORITHM,
+                "canonicalization": P.CANONICALIZATION,
+                "merkle": P.MERKLE,
+            },
+            "log_id": rep.log_id,
+            "event": {
+                "body": _event_body_from_row(e),
+                "event_hash": e["event_hash"],
+                "key_id": e["key_id"],
+                "signature": e["signature"],
+            },
+            "inclusion": {
+                "batch": batch["batch"],
+                "from_seq": batch["from_seq"],
+                "seq": batch["seq"],
+                "leaf_index": index,
+                "tree_size": len(hashes),
+                "path": P.merkle_path(hashes, index),
+                "merkle_root": batch["merkle_root"],
+            },
+            "anchor": {
+                "name": getattr(self.anchor, "name", None),
+                "checkpoint": batch,
+                "receipt": receipt,
+            },
+        }
+
+    def prove(self, table: str, record_id: PkInput, *, schema: str = "public") -> dict[str, Any]:
+        """Inclusion proof for the latest event of a record. Only issued when
+        the record currently verifies (VERIFIED or DELETED)."""
+        rep = self.audit()
+        r = self.verify(table, record_id, schema=schema, audit=rep)
+        if not r.ok:
+            if r.status in (Status.PENDING_ANCHOR, Status.ANCHOR_FAILED):
+                raise NotAnchoredError(f"{r.resource}/{r.record_id} is {r.status.value}")
+            raise LogIntegrityError(
+                f"{r.resource}/{r.record_id} is {r.status.value}; no proof can be issued")
+        assert r.event_seq is not None
+        return self.inclusion_proof(r.event_seq, audit=rep)
 
     # ------------------------------------------------------------ history --
 

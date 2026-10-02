@@ -27,6 +27,7 @@ class Reason(str, Enum):
     NOT_ANCHORED = "NOT_ANCHORED"
     CONFIG_SUPERSEDED = "CONFIG_SUPERSEDED"  # warning: protected fields changed since last event
     UNREADABLE_VALUE = "UNREADABLE_VALUE"
+    SCHEMA_CHANGED = "SCHEMA_CHANGED"  # protected table or column no longer exists
     # log-level
     SEQ_GAP = "SEQ_GAP"
     EVENT_HASH_MISMATCH = "EVENT_HASH_MISMATCH"
@@ -37,6 +38,7 @@ class Reason(str, Enum):
     HEAD_MISMATCH = "HEAD_MISMATCH"
     CHECKPOINT_MISMATCH = "CHECKPOINT_MISMATCH"
     CHECKPOINT_INVALID = "CHECKPOINT_INVALID"
+    LOG_ID_MISMATCH = "LOG_ID_MISMATCH"  # database holds a different log than the pinned one
     # config-level
     CONFIG_TAMPERED = "CONFIG_TAMPERED"
     CONFIG_REFERENCE_INVALID = "CONFIG_REFERENCE_INVALID"
@@ -72,6 +74,8 @@ class VerificationResult:
     current_record_hash: Optional[str] = None
     anchored: bool = False
     anchored_through_seq: int = 0
+    batch: Optional[int] = None  # anchored batch that contains the event
+    merkle_root: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -91,6 +95,8 @@ class VerificationResult:
             "current_record_hash": self.current_record_hash,
             "anchored": self.anchored,
             "anchored_through_seq": self.anchored_through_seq,
+            "batch": self.batch,
+            "merkle_root": self.merkle_root,
         }
 
 
@@ -110,3 +116,21 @@ class InvalidOperationError(VeridexError):
 
 class RecordNotFoundError(VeridexError):
     code = "RECORD_NOT_FOUND"
+
+
+class SchemaChangedError(VeridexError):
+    """A protected table or column no longer exists in the database."""
+
+    code = "SCHEMA_CHANGED"
+
+
+class LogIntegrityError(VeridexError):
+    """The evidence log or the anchor failed a check; nothing was written."""
+
+    code = "LOG_INTEGRITY"
+
+
+class NotAnchoredError(VeridexError):
+    """A proof was requested for evidence that is not anchored (yet)."""
+
+    code = "NOT_ANCHORED"

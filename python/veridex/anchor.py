@@ -3,10 +3,12 @@
 A checkpoint commits to the entire event log up to a sequence number. Its value
 as evidence depends entirely on the anchor being OUTSIDE the attacker's reach.
 
-Stage 1 ships only FileAnchor, a development stand-in. It is a trust boundary
-only if the file lives somewhere the database attacker cannot write (another
-host, WORM/object-lock storage). Blockchain anchors (Anvil, Base) arrive in
-stages 5-6 and implement the same interface.
+A checkpoint commits to one batch: (log_id, batch number, last seq, Merkle root).
+
+FileAnchor is a development stand-in. It is a trust boundary only if the file
+lives somewhere the database attacker cannot write (another host,
+WORM/object-lock storage). EvmAnchor (veridex.evm) anchors the same commitment
+in a smart contract on Anvil, Base or any other EVM chain.
 """
 
 from __future__ import annotations
@@ -23,14 +25,25 @@ class AnchorError(RuntimeError):
 
 class Anchor(Protocol):
     name: str
+    # True: the medium does not authenticate the publisher, so every entry
+    # returned by checkpoints() must be a full checkpoint signed by a trusted
+    # key. False: the medium itself authenticates the publisher (a blockchain
+    # account pinned by the verifier) and entries carry only the commitment.
+    requires_signature: bool
 
     def publish(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         """Publish a signed checkpoint. Returns a receipt."""
         ...
 
-    def checkpoints(self, log_id: str) -> list[dict[str, Any]]:
-        """Return every checkpoint ever published (any log_id), oldest first.
-        Implementations must not filter silently; the verifier decides."""
+    def checkpoints(self, log_id: str, *, pending: bool = False) -> list[dict[str, Any]]:
+        """Return the published checkpoints, oldest first. Each entry has at
+        least ``log_id``, ``batch``, ``seq`` and ``merkle_root``.
+
+        Implementations must not hide entries of a medium that is shared
+        between logs; the verifier decides. ``pending=True`` also returns
+        entries that are published but not yet final. It is used only to decide
+        what to anchor next, never for verification.
+        """
         ...
 
 
@@ -38,6 +51,7 @@ class FileAnchor:
     """Append-only JSON-lines file. DEVELOPMENT ONLY - see module docstring."""
 
     name = "file"
+    requires_signature = True
 
     def __init__(self, path: str | os.PathLike[str]):
         self.path = Path(path)
@@ -54,7 +68,7 @@ class FileAnchor:
             raise AnchorError(f"could not write anchor file {self.path}: {e}") from e
         return {"anchor": self.name, "location": str(self.path)}
 
-    def checkpoints(self, log_id: str) -> list[dict[str, Any]]:
+    def checkpoints(self, log_id: str, *, pending: bool = False) -> list[dict[str, Any]]:
         if not self.path.exists():
             return []
         try:
@@ -68,9 +82,10 @@ class UnavailableAnchor:
     """Simulates an anchor that cannot be reached (used in tests)."""
 
     name = "unavailable"
+    requires_signature = True
 
     def publish(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         raise AnchorError("anchor unavailable")
 
-    def checkpoints(self, log_id: str) -> list[dict[str, Any]]:
+    def checkpoints(self, log_id: str, *, pending: bool = False) -> list[dict[str, Any]]:
         raise AnchorError("anchor unavailable")

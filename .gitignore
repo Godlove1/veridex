@@ -5,3 +5,5 @@ __pycache__/
 node_modules/
 *.jsonl
 .env
+contracts/out/
+contracts/cache/

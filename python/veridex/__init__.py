@@ -6,8 +6,11 @@ from .protocol import Signer, TrustedKeys
 from .results import (
     ConfigurationError,
     InvalidOperationError,
+    LogIntegrityError,
+    NotAnchoredError,
     Reason,
     RecordNotFoundError,
+    SchemaChangedError,
     Status,
     VerificationResult,
     VeridexError,
@@ -32,5 +35,8 @@ __all__ = [
     "VeridexError",
     "ConfigurationError",
     "InvalidOperationError",
+    "LogIntegrityError",
+    "NotAnchoredError",
     "RecordNotFoundError",
+    "SchemaChangedError",
 ]

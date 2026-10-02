@@ -9,6 +9,7 @@ protocol break and needs a new protocol version.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -92,13 +93,26 @@ def main() -> None:
         if op != "CONFIGURE":
             prev_rec = h
 
-    cp = P.checkpoint_body(log_id="7e1f0c4a-2b3d-4e5f-8a9b-0c1d2e3f4a5b", seq=len(log), head=prev_log,
-                           created_at="2026-10-02T08:40:00.000000Z")
+    # The checkpoint anchors the whole log above as batch 1.
+    log_hashes = [e["event_hash"] for e in log]
+    log_id = "7e1f0c4a-2b3d-4e5f-8a9b-0c1d2e3f4a5b"
+    cp = P.checkpoint_body(log_id=log_id, batch=1, from_seq=1, seq=len(log),
+                           merkle_root=P.merkle_root(log_hashes), created_at="2026-10-02T08:40:00.000000Z")
     cp_h = P.checkpoint_hash(cp)
+
+    # Merkle trees of every shape up to 9 leaves, with every inclusion path.
+    merkle = []
+    for n in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+        leaves = [hashlib.sha256(f"leaf-{i}".encode()).hexdigest() for i in range(n)]
+        root = P.merkle_root(leaves)
+        paths = [P.merkle_path(leaves, i) for i in range(n)]
+        assert all(P.verify_inclusion(leaves[i], i, n, paths[i], root) for i in range(n))
+        merkle.append({"leaves": leaves, "root": root, "paths": paths})
 
     out = {
         "protocol": {"version": P.PROTOCOL_VERSION, "hash_algorithm": P.HASH_ALGORITHM,
-                     "canonicalization": P.CANONICALIZATION, "signature": "Ed25519"},
+                     "canonicalization": P.CANONICALIZATION, "signature": "Ed25519", "merkle": P.MERKLE,
+                     "checkpoint_version": P.CHECKPOINT_VERSION},
         "key": {"seed": SEED, "public_key": signer.public_key_hex, "key_id": signer.key_id},
         "canonical": canonical,
         "invalid": invalid,
@@ -107,6 +121,8 @@ def main() -> None:
         "log": log,
         "checkpoint": {"body": cp, "checkpoint_hash": cp_h, "key_id": signer.key_id,
                        "signature": signer.sign(cp_h)},
+        "log_key": {"log_id": log_id, "log_key": P.log_key(log_id)},
+        "merkle": merkle,
     }
     OUT.write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"wrote {OUT}")

@@ -11,6 +11,8 @@ CREATE ROLE veridex_audit NOLOGIN;
 GRANT USAGE ON SCHEMA veridex TO app_user, veridex_audit;
 
 GRANT SELECT, INSERT ON veridex.events, veridex.configurations TO app_user;
+-- Only the process that runs `veridex checkpoint` needs to write batches.
+GRANT SELECT, INSERT ON veridex.batches TO app_user;
 GRANT SELECT, INSERT, UPDATE ON veridex.protected_resources TO app_user;
 GRANT SELECT, UPDATE ON veridex.log_head TO app_user;
 REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA veridex FROM app_user;
@@ -18,5 +20,5 @@ REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA veridex FROM app_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA veridex TO veridex_audit;
 
 -- The append-only triggers created by `veridex init` already reject UPDATE and
--- DELETE on events and configurations for every role except superusers (who can
+-- DELETE on events, configurations and batches for every role except superusers (who can
 -- disable triggers). Keep superuser credentials out of the application.
