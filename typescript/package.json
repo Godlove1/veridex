@@ -1,0 +1,20 @@
+{
+  "name": "@veridex/protocol",
+  "version": "0.1.0",
+  "description": "Veridex protocol v1 for TypeScript: canonicalization, hashing, signatures, offline log verification",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

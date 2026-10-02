@@ -1,0 +1,338 @@
+{
+  "protocol": {
+    "version": 1,
+    "hash_algorithm": "SHA-256",
+    "canonicalization": "vcf-1",
+    "signature": "Ed25519"
+  },
+  "key": {
+    "seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "key_id": "21fe31dfa154a261"
+  },
+  "canonical": [
+    {
+      "name": "spec example payment",
+      "input": {
+        "id": 123,
+        "amount": "5000.00",
+        "currency": "XAF",
+        "status": "completed"
+      },
+      "canonical": "{\"amount\":\"5000.00\",\"currency\":\"XAF\",\"id\":123,\"status\":\"completed\"}",
+      "record_hash": "7368f31a476e2cb74ce46f77a271eba09fcca0cb757a626dfbd42e4b4b1650bc"
+    },
+    {
+      "name": "empty object",
+      "input": {},
+      "canonical": "{}",
+      "record_hash": "108a3586acc15fc847e6a478385430162a26be6dc4c08c1de274b69a3a14525b"
+    },
+    {
+      "name": "empty array",
+      "input": [],
+      "canonical": "[]",
+      "record_hash": "82dccbadbf52766a6afea83bf07107e67ff06a50630c4d2b5b825df60513112f"
+    },
+    {
+      "name": "scalars",
+      "input": {
+        "t": true,
+        "f": false,
+        "n": null,
+        "zero": 0,
+        "neg": -42
+      },
+      "canonical": "{\"f\":false,\"n\":null,\"neg\":-42,\"t\":true,\"zero\":0}",
+      "record_hash": "34af09dafaffdd21cae51ad8312bf8cc1168fc5e489d76b82f3f70a342a2054f"
+    },
+    {
+      "name": "max safe integer",
+      "input": {
+        "big": 9007199254740991,
+        "small": -9007199254740991
+      },
+      "canonical": "{\"big\":9007199254740991,\"small\":-9007199254740991}",
+      "record_hash": "e9ac6879c08e0d1bc3f2e8e9cb1493f71c1dd3e20b5b46f902f523c3e372391e"
+    },
+    {
+      "name": "key order is by UTF-8 bytes, not insertion",
+      "input": {
+        "b": 1,
+        "a": 2,
+        "B": 3,
+        "aa": 4,
+        "_": 5
+      },
+      "canonical": "{\"B\":3,\"_\":5,\"a\":2,\"aa\":4,\"b\":1}",
+      "record_hash": "4ab5f066d0c60e3cf4524a9ad8ea510bddb998ee83aba265790dd1a44f57a615"
+    },
+    {
+      "name": "non-ASCII keys sort by UTF-8 bytes",
+      "input": {
+        "é": 1,
+        "z": 2,
+        "€": 3,
+        "😀": 4,
+        "ÿ": 5
+      },
+      "canonical": "{\"z\":2,\"é\":1,\"ÿ\":5,\"€\":3,\"😀\":4}",
+      "record_hash": "1ff8046586afc37d759a6d8f6ed7bddd1d7d77748ac8c09311ea17433f3637e1"
+    },
+    {
+      "name": "NFC normalization of decomposed string",
+      "input": {
+        "name": "école"
+      },
+      "canonical": "{\"name\":\"école\"}",
+      "record_hash": "41e2f6ffda926df080ae6115a3229b3dec3d3613f3ea893bdc4f84ec9ace5506"
+    },
+    {
+      "name": "NFC normalization of key",
+      "input": {
+        "café": 1
+      },
+      "canonical": "{\"café\":1}",
+      "record_hash": "6d16e5c91f3e7721bb38d9953ae6e461badc2ae52020a425cc1293da19bbe221"
+    },
+    {
+      "name": "escapes",
+      "input": {
+        "s": "quote\" backslash\\ nl\n tab\t cr\r bs\b ff\f"
+      },
+      "canonical": "{\"s\":\"quote\\\" backslash\\\\ nl\\n tab\\t cr\\r bs\\b ff\\f\"}",
+      "record_hash": "f743f726bee81392f7646df5969f5929f2e894b12da6183ff1a9729e61d6e6ee"
+    },
+    {
+      "name": "other control chars use lowercase \\u",
+      "input": {
+        "s": "\u0000\u0001\u001f"
+      },
+      "canonical": "{\"s\":\"\\u0000\\u0001\\u001f\"}",
+      "record_hash": "a41a1c02894eadc3c34a294af73bc7e1b089924e43ead468c14460940f69e2f1"
+    },
+    {
+      "name": "non-ASCII output raw, not escaped",
+      "input": {
+        "s": "Yaoundé – 東京 – 😀"
+      },
+      "canonical": "{\"s\":\"Yaoundé – 東京 – 😀\"}",
+      "record_hash": "4de31e98eb0171867ca55cd3857fb2161ae54242e50235634334f701a85b0aaf"
+    },
+    {
+      "name": "slash is not escaped",
+      "input": {
+        "url": "https://a/b"
+      },
+      "canonical": "{\"url\":\"https://a/b\"}",
+      "record_hash": "3a68aaa8ae641509836355053863ee88874a49b8e20205f7d08f265f31ef9200"
+    },
+    {
+      "name": "nested",
+      "input": {
+        "outer": {
+          "z": [
+            3,
+            {
+              "y": null,
+              "x": "1"
+            }
+          ],
+          "a": []
+        }
+      },
+      "canonical": "{\"outer\":{\"a\":[],\"z\":[3,{\"x\":\"1\",\"y\":null}]}}",
+      "record_hash": "291cc801ffed173b94e41835d9fbad16e473bc47a93ae1c1e3fdda3113e02d5d"
+    },
+    {
+      "name": "array order preserved",
+      "input": [
+        3,
+        1,
+        2
+      ],
+      "canonical": "[3,1,2]",
+      "record_hash": "7e690181e676c9fb6ff0a5cd46f0968fdb0f3936c644fc6cccfe927bf7763f31"
+    },
+    {
+      "name": "top-level string",
+      "input": "hello",
+      "canonical": "\"hello\"",
+      "record_hash": "3dd2f5580a627a2bb595a52e4f01f195558067381efec02a2dffdcd1079309d1"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "float",
+      "input": {
+        "amount": 1.5
+      }
+    },
+    {
+      "name": "unsafe integer",
+      "input": {
+        "id": 9007199254740993
+      }
+    },
+    {
+      "name": "duplicate keys after NFC",
+      "input": {
+        "é": 1,
+        "é": 2
+      }
+    }
+  ],
+  "records": [
+    {
+      "input": {
+        "amount": "500.00",
+        "currency": "XAF",
+        "id": 123,
+        "recipient": "alice",
+        "status": "completed"
+      },
+      "record_hash": "926f28a5720676474c7af3074dd424997aaa1e057f8b7ab07e9cd74cc6ebf0df"
+    },
+    {
+      "input": {
+        "amount": "9999999.00",
+        "currency": "XAF",
+        "id": 123,
+        "recipient": "alice",
+        "status": "completed"
+      },
+      "record_hash": "d62223b51372cd4df7a563e686f188929b8cfb722eb309fcf314f7db63ba44b0"
+    },
+    {
+      "input": {
+        "id": "9007199254740993",
+        "created": "2026-10-02T08:34:00.000000Z",
+        "uuid": "0b6d1c2e-6f0a-4c8e-9a3b-1d2e3f4a5b6c",
+        "blob": "0xdeadbeef",
+        "tags": [
+          "a",
+          "b"
+        ],
+        "meta": {
+          "k": "v"
+        },
+        "maybe": null
+      },
+      "record_hash": "b7847ea2e5bb735d831ee8e089148e994c7e70e3af196efd38bf58c5cf3012fb"
+    }
+  ],
+  "config": {
+    "body": {
+      "v": 1,
+      "resource": "public.payments",
+      "schema": "public",
+      "table": "payments",
+      "primary_key": [
+        "id"
+      ],
+      "fields": [
+        "amount",
+        "currency",
+        "id",
+        "recipient",
+        "status"
+      ],
+      "version": 1,
+      "prev_config_hash": null,
+      "canonicalization": "vcf-1",
+      "hash_algorithm": "SHA-256"
+    },
+    "canonical": "{\"canonicalization\":\"vcf-1\",\"fields\":[\"amount\",\"currency\",\"id\",\"recipient\",\"status\"],\"hash_algorithm\":\"SHA-256\",\"prev_config_hash\":null,\"primary_key\":[\"id\"],\"resource\":\"public.payments\",\"schema\":\"public\",\"table\":\"payments\",\"v\":1,\"version\":1}",
+    "config_hash": "e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca"
+  },
+  "log": [
+    {
+      "body": {
+        "v": 1,
+        "seq": 1,
+        "op": "CONFIGURE",
+        "resource": "public.payments",
+        "record_id": null,
+        "version": 1,
+        "record_hash": null,
+        "prev_event_hash": null,
+        "prev_log_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "config_hash": "e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca",
+        "created_at": "2026-10-02T08:31:00.000000Z"
+      },
+      "canonical": "{\"config_hash\":\"e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca\",\"created_at\":\"2026-10-02T08:31:00.000000Z\",\"op\":\"CONFIGURE\",\"prev_event_hash\":null,\"prev_log_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"record_hash\":null,\"record_id\":null,\"resource\":\"public.payments\",\"seq\":1,\"v\":1,\"version\":1}",
+      "event_hash": "c5037b6e5463bedb47e4fa96831acfc5a49e9993f46f70234e70d8427ebfe37e",
+      "key_id": "21fe31dfa154a261",
+      "signature": "ae87358db9553e5f9e62a5f038e8c9f0ec555be483390caf04a08c173a57cb7cbe8f40232cd015dffdec42b3c319fe6020cedee164343450839a04f09f1d5702"
+    },
+    {
+      "body": {
+        "v": 1,
+        "seq": 2,
+        "op": "CREATE",
+        "resource": "public.payments",
+        "record_id": "123",
+        "version": 1,
+        "record_hash": "926f28a5720676474c7af3074dd424997aaa1e057f8b7ab07e9cd74cc6ebf0df",
+        "prev_event_hash": null,
+        "prev_log_hash": "c5037b6e5463bedb47e4fa96831acfc5a49e9993f46f70234e70d8427ebfe37e",
+        "config_hash": "e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca",
+        "created_at": "2026-10-02T08:32:00.000000Z"
+      },
+      "canonical": "{\"config_hash\":\"e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca\",\"created_at\":\"2026-10-02T08:32:00.000000Z\",\"op\":\"CREATE\",\"prev_event_hash\":null,\"prev_log_hash\":\"c5037b6e5463bedb47e4fa96831acfc5a49e9993f46f70234e70d8427ebfe37e\",\"record_hash\":\"926f28a5720676474c7af3074dd424997aaa1e057f8b7ab07e9cd74cc6ebf0df\",\"record_id\":\"123\",\"resource\":\"public.payments\",\"seq\":2,\"v\":1,\"version\":1}",
+      "event_hash": "83be43ad94d9aef52865947bc6c7edacf6b51b12065370e82fec73a91c9e1e13",
+      "key_id": "21fe31dfa154a261",
+      "signature": "e2450787cad7ab19471b557e357fb5554a447aeef79f4d02e400da237759cc7101747fcc97b13cdc6d73a30baea581edd67319c67398f1569cdd979cefa6ca0a"
+    },
+    {
+      "body": {
+        "v": 1,
+        "seq": 3,
+        "op": "UPDATE",
+        "resource": "public.payments",
+        "record_id": "123",
+        "version": 2,
+        "record_hash": "d62223b51372cd4df7a563e686f188929b8cfb722eb309fcf314f7db63ba44b0",
+        "prev_event_hash": "83be43ad94d9aef52865947bc6c7edacf6b51b12065370e82fec73a91c9e1e13",
+        "prev_log_hash": "83be43ad94d9aef52865947bc6c7edacf6b51b12065370e82fec73a91c9e1e13",
+        "config_hash": "e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca",
+        "created_at": "2026-10-02T08:33:00.000000Z"
+      },
+      "canonical": "{\"config_hash\":\"e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca\",\"created_at\":\"2026-10-02T08:33:00.000000Z\",\"op\":\"UPDATE\",\"prev_event_hash\":\"83be43ad94d9aef52865947bc6c7edacf6b51b12065370e82fec73a91c9e1e13\",\"prev_log_hash\":\"83be43ad94d9aef52865947bc6c7edacf6b51b12065370e82fec73a91c9e1e13\",\"record_hash\":\"d62223b51372cd4df7a563e686f188929b8cfb722eb309fcf314f7db63ba44b0\",\"record_id\":\"123\",\"resource\":\"public.payments\",\"seq\":3,\"v\":1,\"version\":2}",
+      "event_hash": "315054f2ddf8cdf723493dc3136e6a460059b856942cf34a7a6fc526eb251993",
+      "key_id": "21fe31dfa154a261",
+      "signature": "edfb411cd07543bff726102af624dd9f741a5c39afc3d7a494939ed22219192af7fd0b64a86f4366f844f56b6af31459370462bffc503f0b8c7e21aa34174e06"
+    },
+    {
+      "body": {
+        "v": 1,
+        "seq": 4,
+        "op": "DELETE",
+        "resource": "public.payments",
+        "record_id": "123",
+        "version": 3,
+        "record_hash": "d62223b51372cd4df7a563e686f188929b8cfb722eb309fcf314f7db63ba44b0",
+        "prev_event_hash": "315054f2ddf8cdf723493dc3136e6a460059b856942cf34a7a6fc526eb251993",
+        "prev_log_hash": "315054f2ddf8cdf723493dc3136e6a460059b856942cf34a7a6fc526eb251993",
+        "config_hash": "e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca",
+        "created_at": "2026-10-02T08:34:00.000000Z"
+      },
+      "canonical": "{\"config_hash\":\"e481cce7ed6cf78848b360a68a8411366d51433cb0dd0d5b17b427b97d5133ca\",\"created_at\":\"2026-10-02T08:34:00.000000Z\",\"op\":\"DELETE\",\"prev_event_hash\":\"315054f2ddf8cdf723493dc3136e6a460059b856942cf34a7a6fc526eb251993\",\"prev_log_hash\":\"315054f2ddf8cdf723493dc3136e6a460059b856942cf34a7a6fc526eb251993\",\"record_hash\":\"d62223b51372cd4df7a563e686f188929b8cfb722eb309fcf314f7db63ba44b0\",\"record_id\":\"123\",\"resource\":\"public.payments\",\"seq\":4,\"v\":1,\"version\":3}",
+      "event_hash": "1ba7a2c6c8453cfb188f9d7234c064892f5d99be8262984cfec8add027f3f398",
+      "key_id": "21fe31dfa154a261",
+      "signature": "1533e7344d8b2ec5b5db3b258e7f2ae93b11f939bb48a157e016dcb88eaeec083524858162a35e559552d9526bbc78356d7d51a807a3b929605347ffd3e2b10c"
+    }
+  ],
+  "checkpoint": {
+    "body": {
+      "v": 1,
+      "log_id": "7e1f0c4a-2b3d-4e5f-8a9b-0c1d2e3f4a5b",
+      "seq": 4,
+      "head": "1ba7a2c6c8453cfb188f9d7234c064892f5d99be8262984cfec8add027f3f398",
+      "created_at": "2026-10-02T08:40:00.000000Z"
+    },
+    "checkpoint_hash": "9dc6d2c586299956c5bb7550f38086db9785abfd8cf7d9f4e8ca4fd6fe9b0c4e",
+    "key_id": "21fe31dfa154a261",
+    "signature": "3de5f0d2d34f8c6f66b0389b04af089675b9a1bd1376e4e70dab15eee822f54393e5249d7c26620456cfebfc1e69e30f03f7bc5ab142fad6537854f19527db09"
+  }
+}
